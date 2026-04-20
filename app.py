@@ -31,7 +31,7 @@ WATCHLIST = [
     'SPY', 'QQQ', 'IWM',
 ]
 
-APPROVED_SYMBOLS = set(WATCHLIST)
+PENNY_STOCK_MIN = 5.0  # SEC definition: under $5 = penny stock
 
 STRATEGIES = {
     'ultra_safe':       {'interval': 120, 'position_pct': 0.02, 'max_pos': 3,  'threshold': 0.025, 'label': 'Ultra Safe'},
@@ -412,12 +412,12 @@ def api_buy():
     if not symbol or shares <= 0:
         return jsonify({'error': 'Symbol and positive share count required'}), 400
 
-    if symbol not in APPROVED_SYMBOLS:
-        return jsonify({'error': f'{symbol} is not on the approved watchlist'}), 400
-
     price = get_price(symbol) or fetch_price_now(symbol)
     if not price:
         return jsonify({'error': f'Could not fetch price for {symbol}'}), 400
+
+    if price < PENNY_STOCK_MIN:
+        return jsonify({'error': f'{symbol} is a penny stock (${price:.2f} < $5.00) — not allowed'}), 400
 
     cost = shares * price
     with _db_lock:
