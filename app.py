@@ -21,9 +21,10 @@ STRATEGIES = {
     'ultra_aggressive': {'interval':   8, 'position_pct': 0.35, 'max_pos': 10, 'threshold': 0.001, 'label': 'Ultra Aggressive'},
 }
 
-_price_cache = {}   # symbol -> {p, t}
-_ma_cache = {}      # "symbol_N" -> {ma, t}
+_price_cache = {}   # symbol -> float  (updated by background thread)
+_ma_cache = {}      # symbol -> float
 _db_lock = threading.Lock()
+_prices_ready = False  # True once first fetch completes
 
 
 # ---------------------------------------------------------------------------
@@ -83,45 +84,65 @@ def init_db():
 
 
 # ---------------------------------------------------------------------------
-# Price fetching  (yfinance with 60s cache; random-walk fallback)
+# Price fetching — bulk refresh in background, zero blocking in request path
 # ---------------------------------------------------------------------------
 
+def _refresh_prices():
+    """Fetch all watchlist prices + MAs in one bulk yf.download call."""
+    global _prices_ready
+    try:
+        import yfinance as yf
+        # Single bulk download for current prices (1-min bars, today)
+        raw = yf.download(
+            WATCHLIST, period='1d', interval='1m',
+            group_by='ticker', progress=False, auto_adjust=True, threads=True
+        )
+        for sym in WATCHLIST:
+            try:
+                col = raw[sym]['Close'] if len(WATCHLIST) > 1 else raw['Close']
+                col = col.dropna()
+                if not col.empty:
+                    _price_cache[sym] = float(col.iloc[-1])
+            except Exception:
+                pass
+
+        # Daily data for 10-day MA (one bulk call)
+        daily = yf.download(
+            WATCHLIST, period='20d', interval='1d',
+            group_by='ticker', progress=False, auto_adjust=True, threads=True
+        )
+        for sym in WATCHLIST:
+            try:
+                col = daily[sym]['Close'] if len(WATCHLIST) > 1 else daily['Close']
+                col = col.dropna()
+                if len(col) >= 10:
+                    _ma_cache[sym] = float(col.tail(10).mean())
+            except Exception:
+                pass
+
+        _prices_ready = True
+        print(f"Prices refreshed: {list(_price_cache.keys())}")
+    except Exception as e:
+        print(f"Price refresh error: {e}")
+        # Apply tiny random walk to keep cached prices alive
+        for sym in list(_price_cache.keys()):
+            _price_cache[sym] *= (1 + random.gauss(0, 0.0003))
+
+
 def get_price(symbol):
-    entry = _price_cache.get(symbol)
-    if entry and time.time() - entry['t'] < 60:
-        return entry['p']
-    try:
-        import yfinance as yf
-        hist = yf.Ticker(symbol).history(period='1d', interval='1m')
-        if not hist.empty:
-            p = float(hist['Close'].iloc[-1])
-            _price_cache[symbol] = {'p': p, 't': time.time()}
-            return p
-    except Exception as e:
-        print(f"Price error {symbol}: {e}")
-    # Fallback: random walk from last known price
-    if entry:
-        p = entry['p'] * (1 + random.gauss(0, 0.0005))
-        _price_cache[symbol] = {'p': p, 't': time.time()}
-        return p
-    return None
+    """Return cached price instantly — never blocks on network."""
+    return _price_cache.get(symbol)
 
 
-def get_ma(symbol, period=10):
-    key = f'{symbol}_{period}'
-    entry = _ma_cache.get(key)
-    if entry and time.time() - entry['t'] < 300:
-        return entry['ma']
-    try:
-        import yfinance as yf
-        hist = yf.Ticker(symbol).history(period=f'{period + 5}d', interval='1d')
-        if len(hist) >= period:
-            ma = float(hist['Close'].tail(period).mean())
-            _ma_cache[key] = {'ma': ma, 't': time.time()}
-            return ma
-    except Exception as e:
-        print(f"MA error {symbol}: {e}")
-    return entry['ma'] if entry else None
+def get_ma(symbol):
+    return _ma_cache.get(symbol)
+
+
+def _price_refresh_loop():
+    """Background thread: refresh every 60 s."""
+    while True:
+        _refresh_prices()
+        time.sleep(60)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +184,7 @@ def trading_bot():
                     if not price:
                         continue
 
-                    ma = get_ma(symbol)
+                    ma = _ma_cache.get(symbol)
                     signal = ((price - ma) / ma) if ma else random.uniform(-0.01, 0.01)
 
                     bal = conn.execute('SELECT balance FROM portfolio WHERE id = 1').fetchone()['balance']
@@ -427,6 +448,9 @@ def api_reset():
 # ---------------------------------------------------------------------------
 
 init_db()
+# Price refresher starts first so cache is warm before bot needs it
+_pricer = threading.Thread(target=_price_refresh_loop, daemon=True)
+_pricer.start()
 _bot = threading.Thread(target=trading_bot, daemon=True)
 _bot.start()
 
