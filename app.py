@@ -3,6 +3,8 @@ import sqlite3
 import threading
 import time
 import random
+import json
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, request, render_template
@@ -594,7 +596,135 @@ def api_reset():
         conn.commit()
         conn.close()
     _last_trade.clear()
+    _reasoning_cache.clear()
     return jsonify({'success': True})
+
+
+# ---------------------------------------------------------------------------
+# Trade Analysis / AI Reasoning
+# ---------------------------------------------------------------------------
+
+_reasoning_cache = {}
+_reasoning_lock = threading.Lock()
+REASONING_TTL = 600  # 10 minutes
+
+
+def fetch_news_headlines(symbol, max_items=3):
+    """Fetch Yahoo Finance RSS headlines for a symbol."""
+    import requests
+    try:
+        url = f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US'
+        r = requests.get(url, headers=_YF_HEADERS, timeout=8)
+        root = ET.fromstring(r.content)
+        headlines = []
+        for item in root.iter('item'):
+            title = item.findtext('title', '').strip()
+            if title:
+                headlines.append(title)
+            if len(headlines) >= max_items:
+                break
+        return headlines
+    except Exception as e:
+        print(f'News fetch error {symbol}: {e}')
+        return []
+
+
+def generate_reasoning():
+    """Fetch news + call Claude to produce per-symbol trade reasoning."""
+    import anthropic
+
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    if not api_key:
+        raise RuntimeError('ANTHROPIC_API_KEY not set')
+
+    with _db_lock:
+        conn = get_db()
+        positions = [dict(r) for r in conn.execute('SELECT * FROM positions').fetchall()]
+        recent_trades = [dict(r) for r in conn.execute(
+            'SELECT * FROM trades ORDER BY timestamp DESC LIMIT 20').fetchall()]
+        conn.close()
+
+    if not positions and not recent_trades:
+        return []
+
+    symbols = list({p['symbol'] for p in positions} | {t['symbol'] for t in recent_trades[:10]})
+
+    news_map = {}
+    for sym in symbols[:15]:
+        news_map[sym] = fetch_news_headlines(sym)
+
+    pos_lines = []
+    for p in positions:
+        price = get_price(p['symbol']) or p['avg_price']
+        pnl = (price - p['avg_price']) * p['shares']
+        pos_lines.append(
+            f"  {p['symbol']}: {p['shares']:.4f} sh @ ${p['avg_price']:.2f}, "
+            f"now ${price:.2f}, P&L ${pnl:+.2f}")
+
+    trade_lines = []
+    for t in recent_trades[:10]:
+        line = f"  {t['action']} {t['symbol']}: {t['shares']:.4f} sh @ ${t['price']:.2f}"
+        if t['pnl'] is not None:
+            line += f" (P&L ${t['pnl']:+.2f})"
+        trade_lines.append(line)
+
+    news_lines = []
+    for sym, headlines in news_map.items():
+        if headlines:
+            news_lines.append(f"  {sym}: " + " | ".join(headlines))
+
+    prompt = (
+        "You are a financial analyst for a paper trading bot. Analyze the positions and trades below, "
+        "then provide brief reasoning for each symbol.\n\n"
+        "CURRENT POSITIONS:\n" + ("\n".join(pos_lines) if pos_lines else "  None") + "\n\n"
+        "RECENT TRADES (last 10):\n" + ("\n".join(trade_lines) if trade_lines else "  None") + "\n\n"
+        "LATEST NEWS HEADLINES:\n" + ("\n".join(news_lines) if news_lines else "  No news available") + "\n\n"
+        "Consider: technical signals, news sentiment, current macroeconomic conditions, "
+        "Fed policy, political environment, sector trends.\n\n"
+        "Respond with a JSON array ONLY (no markdown, no extra text):\n"
+        '[{"symbol":"AAPL","sentiment":"BULLISH","reasoning":"2-3 sentences.","headlines":["headline1","headline2"]}]'
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model='claude-haiku-4-5',
+        max_tokens=1500,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+
+    text = message.content[0].text.strip()
+    if text.startswith('```'):
+        parts = text.split('```')
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith('json'):
+            text = text[4:].strip()
+
+    result = json.loads(text)
+    for item in result:
+        if not item.get('headlines'):
+            item['headlines'] = news_map.get(item['symbol'], [])
+    return result
+
+
+@app.route('/api/reasoning')
+def api_reasoning():
+    force = request.args.get('force', '0') == '1'
+    with _reasoning_lock:
+        cached = _reasoning_cache.get('data')
+        ts = _reasoning_cache.get('ts', 0)
+        if cached is not None and not force and time.time() - ts < REASONING_TTL:
+            return jsonify({'data': cached, 'cached': True, 'age': int(time.time() - ts)})
+
+    try:
+        data = generate_reasoning()
+        with _reasoning_lock:
+            _reasoning_cache['data'] = data
+            _reasoning_cache['ts'] = time.time()
+        return jsonify({'data': data, 'cached': False, 'age': 0})
+    except Exception as e:
+        print(f'Reasoning error: {e}')
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 # ---------------------------------------------------------------------------
