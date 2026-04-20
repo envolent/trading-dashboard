@@ -64,6 +64,9 @@ def _load_sp500():
     except Exception as e:
         print(f'S&P 500 load error: {e} — using fallback list')
 
+MAX_TRADE_VALUE  = 500.0   # max $ per buy order (buy 1 share if price > this)
+MAX_DAILY_TRADES = 25      # bot + manual combined
+
 STRATEGIES = {
     'ultra_safe':       {'interval': 120, 'position_pct': 0.02, 'max_pos': 3,  'threshold': 0.025, 'label': 'Ultra Safe'},
     'safe':             {'interval':  60, 'position_pct': 0.05, 'max_pos': 5,  'threshold': 0.015, 'label': 'Safe'},
@@ -254,6 +257,8 @@ def trading_bot():
 
             now = time.time()
 
+            today_str = datetime.utcnow().strftime('%Y-%m-%d')
+
             # --- Read phase (short lock) ---
             with _db_lock:
                 conn = get_db()
@@ -262,13 +267,23 @@ def trading_bot():
                 positions_db = {r['symbol']: dict(r) for r in conn.execute('SELECT * FROM positions').fetchall()}
                 n_pos = len(positions_db)
                 pval = portfolio_value(conn)
+                daily_trades = conn.execute(
+                    "SELECT COUNT(*) FROM trades WHERE timestamp LIKE ?", (today_str + '%',)
+                ).fetchone()[0]
                 conn.close()
 
+            if daily_trades >= MAX_DAILY_TRADES:
+                time.sleep(60)
+                continue
+
             cfg = STRATEGIES.get(strategy, STRATEGIES['safe'])
+            remaining = MAX_DAILY_TRADES - daily_trades
 
             # --- Decision phase (no lock) ---
             actions = []
             for symbol in WATCHLIST:
+                if len(actions) >= remaining:
+                    break
                 if now - _last_trade.get(symbol, 0) < cfg['interval']:
                     continue
                 price = get_price(symbol)
@@ -277,10 +292,13 @@ def trading_bot():
                 ma = _ma_cache.get(symbol)
                 signal = ((price - ma) / ma) if ma else random.uniform(-0.01, 0.01)
                 pos = positions_db.get(symbol)
-                trade_val = pval * cfg['position_pct']
 
                 if signal > cfg['threshold'] and pos is None and n_pos < cfg['max_pos']:
-                    shares = round(trade_val / price, 4)
+                    # Cap at $500; if single share > $500 buy exactly 1
+                    if price > MAX_TRADE_VALUE:
+                        shares = 1.0
+                    else:
+                        shares = round(min(pval * cfg['position_pct'], MAX_TRADE_VALUE) / price, 4)
                     cost = shares * price
                     if cost <= bal and shares > 0:
                         actions.append(('BUY', symbol, shares, price, cost, None))
@@ -361,6 +379,9 @@ def api_portfolio():
             "SELECT value FROM equity_history WHERE timestamp LIKE ? ORDER BY timestamp ASC LIMIT 1",
             (today_str + '%',)
         ).fetchone()
+        daily_trades = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE timestamp LIKE ?", (today_str + '%',)
+        ).fetchone()[0]
         conn.close()
 
     positions, pos_val, total_pnl = [], 0, 0
@@ -405,6 +426,8 @@ def api_portfolio():
         'day_number': day_number,
         'today_pnl_pct': round(today_pnl_pct, 2),
         'market_open': is_market_open(),
+        'daily_trades': daily_trades,
+        'max_daily_trades': MAX_DAILY_TRADES,
     })
 
 
@@ -459,8 +482,18 @@ def api_buy():
         return jsonify({'error': f'{symbol} is a penny stock (${price:.2f} < $5.00) — not allowed'}), 400
 
     cost = shares * price
+    if price <= MAX_TRADE_VALUE and cost > MAX_TRADE_VALUE:
+        return jsonify({'error': f'Max ${MAX_TRADE_VALUE:.0f} per order (would cost ${cost:.2f})'}), 400
+
     with _db_lock:
         conn = get_db()
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        daily_trades = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE timestamp LIKE ?", (today_str + '%',)
+        ).fetchone()[0]
+        if daily_trades >= MAX_DAILY_TRADES:
+            conn.close()
+            return jsonify({'error': f'Daily trade limit reached ({MAX_DAILY_TRADES}/day)'}), 400
         bal = conn.execute('SELECT balance FROM portfolio WHERE id = 1').fetchone()['balance']
         if cost > bal:
             conn.close()
