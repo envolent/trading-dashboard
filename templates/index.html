@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClaudeBot 01 — Paper Trading</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #080810;
+      --surface: #0f0f1c;
+      --card: #13131f;
+      --border: #1d1d30;
+      --border2: #252538;
+      --muted: #2a2a45;
+      --text: #e2e8f0;
+      --text-muted: #64748b;
+      --text-dim: #3d3d5c;
+      --cyan: #06b6d4;
+      --cyan-dim: rgba(6,182,212,0.15);
+      --green: #22c55e;
+      --green-dim: rgba(34,197,94,0.12);
+      --red: #ef4444;
+      --red-dim: rgba(239,68,68,0.12);
+      --indigo: #6366f1;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; min-height: 100vh; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+    .input {
+      background: #0d0d1a;
+      border: 1px solid var(--border2);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 13px;
+      width: 100%;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .input:focus { border-color: var(--cyan); }
+    .input::placeholder { color: var(--text-dim); }
+    .btn-buy {
+      background: var(--green-dim);
+      border: 1px solid rgba(34,197,94,0.3);
+      color: #4ade80;
+      border-radius: 8px;
+      padding: 9px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+      width: 100%;
+    }
+    .btn-buy:hover { background: rgba(34,197,94,0.2); }
+    .btn-sell {
+      background: var(--red-dim);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #f87171;
+      border-radius: 8px;
+      padding: 9px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+      width: 100%;
+    }
+    .btn-sell:hover { background: rgba(239,68,68,0.2); }
+    .badge-green { background: var(--green-dim); border: 1px solid rgba(34,197,94,0.25); color: #4ade80; border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; }
+    .badge-red   { background: var(--red-dim);   border: 1px solid rgba(239,68,68,0.25);  color: #f87171; border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; }
+    .badge-cyan  { background: var(--cyan-dim);  border: 1px solid rgba(6,182,212,0.25);  color: var(--cyan); border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; }
+    .badge-muted { background: var(--muted); color: var(--text-muted); border-radius: 999px; padding: 2px 10px; font-size: 11px; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
+    select option { background: #13131f; color: #e2e8f0; }
+  </style>
+</head>
+<body>
+
+  <!-- ── Navbar ─────────────────────────────────────────────────── -->
+  <nav style="background:var(--surface); border-bottom:1px solid var(--border);"
+       class="px-5 py-3 flex items-center justify-between sticky top-0 z-20">
+    <div class="flex items-center gap-3">
+      <!-- Logo -->
+      <div class="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+           style="background: linear-gradient(135deg,#06b6d4,#3b82f6);">
+        <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
+        </svg>
+      </div>
+      <div class="leading-tight">
+        <div class="font-bold text-white text-sm">ClaudeBot 01</div>
+        <div style="color:var(--text-muted); font-size:10px;">Paper Trading Dashboard</div>
+      </div>
+      <span id="botBadge" class="badge-green hidden sm:inline-block">● Bot Active</span>
+    </div>
+    <div class="flex items-center gap-2">
+      <span style="color:var(--text-muted); font-size:12px;" class="hidden sm:inline">Strategy</span>
+      <select id="strategySelect" onchange="setStrategy(this.value)"
+        class="input" style="width:auto; padding:6px 10px; font-size:12px; font-weight:600; cursor:pointer;">
+        <option value="ultra_safe">Ultra Safe</option>
+        <option value="safe">Safe</option>
+        <option value="risky">Risky</option>
+        <option value="aggressive">Aggressive</option>
+        <option value="ultra_aggressive">Ultra Aggressive</option>
+      </select>
+      <button onclick="confirmReset()"
+        style="background:var(--red-dim); border:1px solid rgba(239,68,68,0.3); color:#f87171;
+               border-radius:8px; padding:6px 12px; font-size:12px; font-weight:600; cursor:pointer;">
+        Reset
+      </button>
+    </div>
+  </nav>
+
+  <!-- ── Ticker Bar ────────────────────────────────────────────── -->
+  <div id="tickerBar"
+       style="background:var(--surface); border-bottom:1px solid var(--border);
+              overflow-x:auto; white-space:nowrap; padding:6px 20px; font-size:11px; color:var(--text-muted);">
+    <span style="color:var(--text-dim);">Fetching prices…</span>
+  </div>
+
+  <!-- ── Main ──────────────────────────────────────────────────── -->
+  <div style="max-width:1400px; margin:0 auto; padding:20px 16px; display:flex; flex-direction:column; gap:16px;">
+
+    <!-- Stat Cards -->
+    <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:12px;" id="statsGrid">
+      <div class="card" style="padding:16px;">
+        <div style="font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px;">Portfolio Value</div>
+        <div id="statTotal" style="font-size:26px; font-weight:700; color:#fff;">$10,000.00</div>
+        <div id="statReturnLine" style="font-size:11px; color:var(--text-muted); margin-top:4px;">+$0.00 (0.00%)</div>
+      </div>
+      <div class="card" style="padding:16px;">
+        <div style="font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px;">Cash Balance</div>
+        <div id="statCash" style="font-size:26px; font-weight:700; color:#fff;">$10,000.00</div>
+        <div id="statPosLine" style="font-size:11px; color:var(--text-muted); margin-top:4px;">$0.00 in positions</div>
+      </div>
+      <div class="card" style="padding:16px;">
+        <div style="font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px;">Total P&amp;L</div>
+        <div id="statPnl" style="font-size:26px; font-weight:700; color:#4ade80;">+$0.00</div>
+        <div id="statPosCount" style="font-size:11px; color:var(--text-muted); margin-top:4px;">0 open positions</div>
+      </div>
+      <div class="card" style="padding:16px;">
+        <div style="font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px;">Total Return</div>
+        <div id="statReturn" style="font-size:26px; font-weight:700; color:#4ade80;">0.00%</div>
+        <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">vs $10,000 start</div>
+      </div>
+    </div>
+
+    <!-- Chart + Positions -->
+    <div style="display:grid; grid-template-columns:1fr; gap:16px;" id="midGrid">
+      <!-- Equity Chart -->
+      <div class="card" style="padding:18px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+          <div style="font-size:13px; font-weight:600; color:var(--text);">Equity Curve</div>
+          <div style="display:flex; gap:10px; align-items:center; font-size:11px; color:var(--text-muted);">
+            <span style="display:flex; align-items:center; gap:4px;">
+              <span style="width:20px; height:2px; background:var(--cyan); display:inline-block; border-radius:1px;"></span>Portfolio
+            </span>
+            <span style="display:flex; align-items:center; gap:4px;">
+              <span style="width:20px; height:2px; background:rgba(99,102,241,0.5); display:inline-block; border-radius:1px; border-top:1px dashed;"></span>Baseline
+            </span>
+            <span id="chartPts" style="color:var(--text-dim);">0 pts</span>
+          </div>
+        </div>
+        <div style="height:220px; position:relative;">
+          <canvas id="equityChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Open Positions -->
+      <div class="card" style="padding:18px; display:flex; flex-direction:column;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+          <div style="font-size:13px; font-weight:600; color:var(--text);">Open Positions</div>
+          <span id="posCountBadge" class="badge-muted">0</span>
+        </div>
+        <div id="positionsList" style="display:flex; flex-direction:column; gap:8px; overflow-y:auto; max-height:280px;">
+          <div style="text-align:center; color:var(--text-dim); font-size:12px; padding:20px 0;">No open positions</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Manual Trade + Trade History -->
+    <div style="display:grid; grid-template-columns:1fr; gap:16px;" id="bottomGrid">
+      <!-- Manual Trade -->
+      <div class="card" style="padding:18px;">
+        <div style="font-size:13px; font-weight:600; color:var(--text); margin-bottom:14px;">Manual Trade</div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <input id="tradeSymbol" class="input" placeholder="Symbol (e.g. AAPL)"
+            maxlength="8" oninput="this.value = this.value.toUpperCase()"/>
+          <input id="tradeShares" class="input" type="number" placeholder="Shares" min="0.0001" step="0.01"/>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:2px;">
+            <button class="btn-buy" onclick="manualTrade('buy')">Buy</button>
+            <button class="btn-sell" onclick="manualTrade('sell')">Sell</button>
+          </div>
+          <div id="tradeMsg" style="font-size:11px; text-align:center; color:var(--text-muted); min-height:16px;"></div>
+        </div>
+        <!-- Quick symbols -->
+        <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">
+          <div style="font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.05em; margin-bottom:8px;">Watchlist</div>
+          <div style="display:flex; flex-wrap:wrap; gap:5px;" id="watchlistChips"></div>
+        </div>
+      </div>
+
+      <!-- Trade History -->
+      <div class="card" style="padding:18px; display:flex; flex-direction:column;">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+          <div style="font-size:13px; font-weight:600; color:var(--text);">Trade History</div>
+          <span style="font-size:11px; color:var(--text-dim);">last 50</span>
+        </div>
+        <div style="overflow:auto; flex:1; max-height:320px;">
+          <table style="width:100%; border-collapse:collapse; font-size:12px;">
+            <thead>
+              <tr style="color:var(--text-muted); border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--card);">
+                <th style="text-align:left; padding:0 10px 8px 0; font-weight:500;">Time</th>
+                <th style="text-align:left; padding:0 10px 8px 0; font-weight:500;">Symbol</th>
+                <th style="text-align:left; padding:0 10px 8px 0; font-weight:500;">Side</th>
+                <th style="text-align:right; padding:0 10px 8px 0; font-weight:500;">Shares</th>
+                <th style="text-align:right; padding:0 10px 8px 0; font-weight:500;">Price</th>
+                <th style="text-align:right; padding:0 10px 8px 0; font-weight:500;">Total</th>
+                <th style="text-align:right; padding:0 0 8px 0; font-weight:500;">P&amp;L</th>
+              </tr>
+            </thead>
+            <tbody id="tradesBody">
+              <tr>
+                <td colspan="7" style="text-align:center; color:var(--text-dim); padding:20px 0; font-size:12px;">No trades yet</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div><!-- /main -->
+
+  <script>
+  // ── Responsive grid breakpoints ──────────────────────────────────────────
+  function applyLayout() {
+    const w = window.innerWidth;
+    const statsGrid = document.getElementById('statsGrid');
+    const midGrid = document.getElementById('midGrid');
+    const bottomGrid = document.getElementById('bottomGrid');
+    if (w >= 1024) {
+      statsGrid.style.gridTemplateColumns = 'repeat(4,1fr)';
+      midGrid.style.gridTemplateColumns = '2fr 1fr';
+      bottomGrid.style.gridTemplateColumns = '320px 1fr';
+    } else if (w >= 640) {
+      statsGrid.style.gridTemplateColumns = 'repeat(2,1fr)';
+      midGrid.style.gridTemplateColumns = '1fr';
+      bottomGrid.style.gridTemplateColumns = '1fr';
+    } else {
+      statsGrid.style.gridTemplateColumns = 'repeat(2,1fr)';
+      midGrid.style.gridTemplateColumns = '1fr';
+      bottomGrid.style.gridTemplateColumns = '1fr';
+    }
+  }
+  applyLayout();
+  window.addEventListener('resize', applyLayout);
+
+  // ── Watchlist chips ──────────────────────────────────────────────────────
+  const WATCHLIST = ['AAPL','MSFT','GOOGL','AMZN','TSLA','NVDA','META','AMD','NFLX','SPY'];
+  const chips = document.getElementById('watchlistChips');
+  WATCHLIST.forEach(sym => {
+    const btn = document.createElement('button');
+    btn.textContent = sym;
+    btn.style.cssText = 'background:#1a1a2e; border:1px solid #252540; color:#94a3b8; border-radius:6px; padding:3px 9px; font-size:11px; cursor:pointer; transition:background .1s;';
+    btn.onmouseover = () => btn.style.background = '#222238';
+    btn.onmouseout = () => btn.style.background = '#1a1a2e';
+    btn.onclick = () => { document.getElementById('tradeSymbol').value = sym; };
+    chips.appendChild(btn);
+  });
+
+  // ── Chart ────────────────────────────────────────────────────────────────
+  const ctx = document.getElementById('equityChart').getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, 220);
+  grad.addColorStop(0, 'rgba(6,182,212,0.25)');
+  grad.addColorStop(1, 'rgba(6,182,212,0)');
+
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: 'Portfolio',
+          data: [],
+          borderColor: '#06b6d4',
+          backgroundColor: grad,
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          pointHoverBackgroundColor: '#06b6d4',
+          fill: true,
+          tension: 0.35,
+        },
+        {
+          label: 'Baseline $10k',
+          data: [],
+          borderColor: 'rgba(99,102,241,0.45)',
+          borderWidth: 1.5,
+          borderDash: [5, 5],
+          pointRadius: 0,
+          fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1a1a2e',
+          borderColor: '#252540',
+          borderWidth: 1,
+          titleColor: '#64748b',
+          bodyColor: '#e2e8f0',
+          titleFont: { size: 11 },
+          bodyFont: { size: 12 },
+          padding: 10,
+          callbacks: {
+            label: ctx => ctx.datasetIndex === 0
+              ? ` $${ctx.raw.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}`
+              : null,
+            afterLabel: ctx => {
+              if (ctx.datasetIndex !== 0) return null;
+              const diff = ctx.raw - 10000;
+              return ` ${diff >= 0 ? '+' : ''}$${Math.abs(diff).toFixed(2)} (${((diff/10000)*100).toFixed(2)}%)`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(37,37,64,0.6)', drawBorder: false },
+          ticks: { color: '#3d3d5c', maxTicksLimit: 7, font: { size: 10 }, maxRotation: 0 },
+        },
+        y: {
+          grid: { color: 'rgba(37,37,64,0.6)', drawBorder: false },
+          ticks: {
+            color: '#3d3d5c', font: { size: 10 },
+            callback: v => '$' + v.toLocaleString(),
+          },
+        },
+      },
+    },
+  });
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  const $ = id => document.getElementById(id);
+  const fmtMoney = n => '$' + Math.abs(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const fmtSigned = (n, prefix='$') => (n >= 0 ? '+' : '-') + prefix + Math.abs(n).toFixed(2);
+  const fmtTime = ts => {
+    const d = new Date(ts + (ts.endsWith('Z') ? '' : 'Z'));
+    return d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+  };
+  const colorOf = (n, gCls='#4ade80', rCls='#f87171', zCls='#64748b') =>
+    n > 0.005 ? gCls : n < -0.005 ? rCls : zCls;
+
+  // ── Render helpers ───────────────────────────────────────────────────────
+  function renderPortfolio(d) {
+    const pnl = d.total_pnl, ret = d.total_return;
+    const c = colorOf(pnl);
+
+    $('statTotal').textContent = fmtMoney(d.total_value);
+    $('statCash').textContent = fmtMoney(d.balance);
+    $('statPosLine').textContent = `${fmtMoney(d.position_value)} in positions`;
+    $('statPnl').textContent = fmtSigned(pnl);
+    $('statPnl').style.color = c;
+    $('statReturn').textContent = (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%';
+    $('statReturn').style.color = c;
+    $('statReturnLine').textContent = `${fmtSigned(pnl)} (${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%)`;
+    $('statReturnLine').style.color = colorOf(pnl, '#22c55e', '#ef4444', '#64748b');
+    $('statPosCount').textContent = `${d.positions.length} open position${d.positions.length !== 1 ? 's' : ''}`;
+
+    // Positions list
+    $('posCountBadge').textContent = d.positions.length;
+    const list = $('positionsList');
+    if (!d.positions.length) {
+      list.innerHTML = '<div style="text-align:center; color:#3d3d5c; font-size:12px; padding:20px 0;">No open positions</div>';
+      return;
+    }
+    list.innerHTML = d.positions.map(p => `
+      <div style="display:flex; align-items:center; justify-content:space-between;
+                  background:#0d0d1a; border:1px solid #1d1d30; border-radius:8px; padding:10px 12px;">
+        <div>
+          <div style="font-weight:700; font-size:14px; color:#fff;">${p.symbol}</div>
+          <div style="font-size:11px; color:#64748b; margin-top:2px;">${p.shares} sh @ $${p.avg_price.toFixed(2)}</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:13px; font-weight:600; color:#e2e8f0;">${fmtMoney(p.value)}</div>
+          <div style="font-size:11px; color:${colorOf(p.pnl)}; margin-top:2px;">
+            ${p.pnl >= 0 ? '+' : ''}$${Math.abs(p.pnl).toFixed(2)}
+            (${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct.toFixed(2)}%)
+          </div>
+        </div>
+      </div>`).join('');
+  }
+
+  function renderTrades(trades) {
+    const tbody = $('tradesBody');
+    if (!trades.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:#3d3d5c; padding:20px 0; font-size:12px;">No trades yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = trades.map(t => {
+      const buy = t.action === 'BUY';
+      const pnlCell = t.pnl != null
+        ? `<td style="text-align:right; color:${t.pnl >= 0 ? '#4ade80' : '#f87171'}; padding:7px 0;">
+             ${t.pnl >= 0 ? '+' : ''}$${Math.abs(t.pnl).toFixed(2)}</td>`
+        : `<td style="text-align:right; color:#3d3d5c; padding:7px 0;">—</td>`;
+      return `
+        <tr style="border-bottom:1px solid #0f0f1c;">
+          <td style="padding:7px 10px 7px 0; color:#64748b; font-size:11px;">${fmtTime(t.timestamp)}</td>
+          <td style="padding:7px 10px 7px 0; font-weight:700; color:#fff;">${t.symbol}</td>
+          <td style="padding:7px 10px 7px 0;">
+            <span style="padding:2px 8px; border-radius:4px; font-size:10px; font-weight:700;
+              background:${buy ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)'};
+              color:${buy ? '#4ade80' : '#f87171'};">${t.action}</span>
+          </td>
+          <td style="text-align:right; padding:7px 10px 7px 0; color:#94a3b8;">${t.shares.toFixed(4)}</td>
+          <td style="text-align:right; padding:7px 10px 7px 0; color:#94a3b8;">$${t.price.toFixed(2)}</td>
+          <td style="text-align:right; padding:7px 10px 7px 0; color:#94a3b8;">$${t.total.toFixed(2)}</td>
+          ${pnlCell}
+        </tr>`;
+    }).join('');
+  }
+
+  function renderChart(history) {
+    if (!history.length) return;
+    const values = history.map(h => h.value);
+    const labels = history.map(h => fmtTime(h.timestamp));
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = values;
+    chart.data.datasets[1].data = history.map(() => 10000);
+    const mn = Math.min(...values, 10000), mx = Math.max(...values, 10000);
+    const pad = (mx - mn) * 0.12 || 150;
+    chart.options.scales.y.min = mn - pad;
+    chart.options.scales.y.max = mx + pad;
+    chart.update('none');
+    $('chartPts').textContent = `${values.length} pts`;
+  }
+
+  function renderTicker(prices) {
+    const bar = $('tickerBar');
+    const entries = Object.entries(prices);
+    if (!entries.length) return;
+    bar.innerHTML = entries.map(([sym, price]) =>
+      `<span style="display:inline-flex; align-items:center; gap:5px;">
+        <span style="color:#94a3b8; font-weight:600;">${sym}</span>
+        <span style="color:#e2e8f0;">$${price.toFixed(2)}</span>
+       </span>`
+    ).join('<span style="color:#252540; margin:0 10px;">|</span>');
+  }
+
+  // ── API calls ────────────────────────────────────────────────────────────
+  async function fetchAll() {
+    try {
+      const [port, trades, equity, prices] = await Promise.all([
+        fetch('/api/portfolio').then(r => r.json()),
+        fetch('/api/trades?limit=50').then(r => r.json()),
+        fetch('/api/equity?limit=200').then(r => r.json()),
+        fetch('/api/prices').then(r => r.json()),
+      ]);
+      renderPortfolio(port);
+      renderTrades(trades);
+      renderChart(equity);
+      renderTicker(prices);
+    } catch (e) {
+      console.error('Poll error:', e);
+    }
+  }
+
+  async function setStrategy(val) {
+    try {
+      await fetch('/api/strategy', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({strategy: val}),
+      });
+    } catch (e) { console.error(e); }
+  }
+
+  async function manualTrade(side) {
+    const symbol = $('tradeSymbol').value.trim().toUpperCase();
+    const shares = parseFloat($('tradeShares').value);
+    const msg = $('tradeMsg');
+
+    if (!symbol || !shares || shares <= 0) {
+      msg.textContent = 'Enter a valid symbol and share count';
+      msg.style.color = '#f87171';
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/${side}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({symbol, shares}),
+      });
+      const data = await res.json();
+      if (data.error) {
+        msg.textContent = data.error;
+        msg.style.color = '#f87171';
+      } else {
+        msg.textContent = `${side.toUpperCase()} ${shares} ${symbol} @ $${data.price?.toFixed(2)} ✓`;
+        msg.style.color = '#4ade80';
+        $('tradeShares').value = '';
+        fetchAll();
+      }
+    } catch (e) {
+      msg.textContent = 'Request failed';
+      msg.style.color = '#f87171';
+    }
+  }
+
+  async function confirmReset() {
+    if (!confirm('Reset portfolio to $10,000?\nThis clears all positions and trade history.')) return;
+    try {
+      await fetch('/api/reset', {method: 'POST'});
+      fetchAll();
+    } catch (e) { console.error(e); }
+  }
+
+  async function loadStrategy() {
+    try {
+      const d = await fetch('/api/strategy').then(r => r.json());
+      $('strategySelect').value = d.strategy;
+    } catch (e) {}
+  }
+
+  // ── Enter key for trade inputs ───────────────────────────────────────────
+  $('tradeSymbol').addEventListener('keydown', e => e.key === 'Enter' && $('tradeShares').focus());
+  $('tradeShares').addEventListener('keydown', e => e.key === 'Enter' && manualTrade('buy'));
+
+  // ── Boot ─────────────────────────────────────────────────────────────────
+  loadStrategy();
+  fetchAll();
+  setInterval(fetchAll, 2500);
+  </script>
+</body>
+</html>
