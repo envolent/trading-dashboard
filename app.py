@@ -270,7 +270,8 @@ def trading_bot():
             # --- Read phase (short lock) ---
             with _db_lock:
                 conn = get_db()
-                strategy = (conn.execute('SELECT strategy FROM settings WHERE id = 1').fetchone() or {}).get('strategy', 'safe')
+                _row = conn.execute('SELECT strategy FROM settings WHERE id = 1').fetchone()
+                strategy = _row['strategy'] if _row else 'safe'
                 bal = conn.execute('SELECT balance FROM portfolio WHERE id = 1').fetchone()['balance']
                 positions_db = {r['symbol']: dict(r) for r in conn.execute('SELECT * FROM positions').fetchall()}
                 n_pos = len(positions_db)
