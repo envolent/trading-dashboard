@@ -127,7 +127,7 @@
       <div style="flex:1; min-width:120px;">
         <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
           <span style="font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em;">Progress to 30-day goal</span>
-          <span style="font-size:10px; color:var(--text-muted);">Goal: <span style="color:#4ade80;">+2–4% / day</span></span>
+          <span style="font-size:10px; color:var(--text-muted);">Goal: <span id="goalLabel" style="color:#4ade80;">+1% / day</span></span>
         </div>
         <div style="height:6px; background:#1f1f1f; border-radius:99px; overflow:hidden; position:relative;">
           <!-- Day fill (gray) -->
@@ -398,6 +398,22 @@
     },
   });
 
+  // ── Strategy goals ───────────────────────────────────────────────────────
+  const STRATEGY_GOALS = {
+    ultra_safe:       { target: 0.5,  label: '+0.5% / day' },
+    safe:             { target: 1.0,  label: '+1% / day'   },
+    risky:            { target: 2.5,  label: '+2–3% / day' },
+    aggressive:       { target: 5.0,  label: '+5% / day'   },
+    ultra_aggressive: { target: 10.0, label: '+10% / day'  },
+  };
+  let currentStrategy = 'safe';
+
+  function applyStrategyGoal(strategy) {
+    currentStrategy = strategy;
+    const g = STRATEGY_GOALS[strategy] || STRATEGY_GOALS['safe'];
+    $('goalLabel').textContent = g.label;
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────────────
   const $ = id => document.getElementById(id);
   const fmtMoney = n => '$' + Math.abs(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
@@ -436,8 +452,8 @@
     const todayPct = d.today_pnl_pct || 0;
     $('dayNum').textContent = day;
     $('dayBar').style.width = ((day / 30) * 100) + '%';
-    // Goal bar: 3% daily = 100% fill; cap at 100%
-    const goalFill = Math.min(100, Math.max(0, (todayPct / 3) * 100));
+    const goalTarget = (STRATEGY_GOALS[currentStrategy] || STRATEGY_GOALS['safe']).target;
+    const goalFill = Math.min(100, Math.max(0, (todayPct / goalTarget) * 100));
     $('pnlBar').style.width = goalFill + '%';
     $('pnlBar').style.background = todayPct >= 0 ? '#22c55e' : '#ef4444';
     const todayEl = $('todayPnl');
@@ -555,6 +571,7 @@
   }
 
   async function setStrategy(val) {
+    applyStrategyGoal(val);
     try {
       await fetch('/api/strategy', {
         method: 'POST',
@@ -609,6 +626,7 @@
     try {
       const d = await fetch('/api/strategy').then(r => r.json());
       $('strategySelect').value = d.strategy;
+      applyStrategyGoal(d.strategy);
     } catch (e) {}
   }
 
