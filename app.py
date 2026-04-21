@@ -77,8 +77,9 @@ STRATEGIES = {
     'ultra_aggressive': {'interval':   8, 'position_pct': 0.35, 'max_pos': 10, 'threshold': 0.001, 'label': 'Ultra Aggressive'},
 }
 
-_price_cache = {}   # symbol -> float  (updated by background thread)
-_ma_cache = {}      # symbol -> float
+_price_cache = {}       # symbol -> float  (updated by background thread)
+_prev_price_cache = {}  # symbol -> float  (snapshot from previous refresh cycle)
+_ma_cache = {}          # symbol -> float  (10-day moving average)
 _db_lock = threading.Lock()
 _prices_ready = False  # True once first fetch completes
 
@@ -165,23 +166,23 @@ def _fetch_quotes_batch(symbols):
 
 def _refresh_prices():
     """Refresh all prices in 100-symbol batches."""
-    global _prices_ready
+    global _prices_ready, _prev_price_cache
     symbols = list(WATCHLIST)
+
+    # Snapshot previous prices before overwriting
+    _prev_price_cache = dict(_price_cache)
+
     # Batch into groups of 100 (Yahoo Finance limit per request)
     for i in range(0, len(symbols), 100):
         _fetch_quotes_batch(symbols[i:i+100])
     if _price_cache:
         _prices_ready = True
         print(f'Prices refreshed for {len(_price_cache)} symbols')
-    else:
-        # Random walk fallback
-        for sym in list(_price_cache):
-            _price_cache[sym] *= (1 + random.gauss(0, 0.0003))
 
-    # -- 10-day MA: only fetch for symbols not yet cached --
+    # -- 10-day MA: fetch 50 per cycle so cache fills in ~10 minutes --
     import requests
     missing_ma = [s for s in symbols if s not in _ma_cache]
-    for sym in missing_ma[:20]:  # max 20 per refresh cycle to avoid hammering
+    for sym in missing_ma[:50]:
         try:
             url = f'https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=20d'
             r = requests.get(url, headers=_YF_HEADERS, timeout=10)
@@ -291,8 +292,19 @@ def trading_bot():
                 price = get_price(symbol)
                 if not price:
                     continue
-                ma = _ma_cache.get(symbol)
-                signal = ((price - ma) / ma) if ma else random.uniform(-0.01, 0.01)
+
+                ma   = _ma_cache.get(symbol)
+                prev = _prev_price_cache.get(symbol)
+
+                if ma and ma > 0:
+                    # Primary signal: deviation from 10-day MA
+                    signal = (price - ma) / ma
+                elif prev and prev > 0:
+                    # Fallback: short-term momentum (price change since last refresh)
+                    signal = (price - prev) / prev
+                else:
+                    continue  # no data yet — skip symbol
+
                 pos = positions_db.get(symbol)
 
                 if signal > cfg['threshold'] and pos is None and n_pos < cfg['max_pos']:
