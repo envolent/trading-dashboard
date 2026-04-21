@@ -79,6 +79,7 @@ STRATEGIES = {
 
 _price_cache = {}       # symbol -> float  (updated by background thread)
 _prev_price_cache = {}  # symbol -> float  (snapshot from previous refresh cycle)
+_change_cache = {}      # symbol -> float  (intraday % change from prev close, decimal)
 _ma_cache = {}          # symbol -> float  (10-day moving average)
 _db_lock = threading.Lock()
 _prices_ready = False  # True once first fetch completes
@@ -149,17 +150,21 @@ def init_db():
 _YF_HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
 def _fetch_quotes_batch(symbols):
-    """Fetch current prices for up to 100 symbols in one call."""
+    """Fetch current prices + intraday change % for up to 100 symbols in one call."""
     import requests
     try:
         csv = ','.join(symbols)
-        url = f'https://query1.finance.yahoo.com/v7/finance/quote?symbols={csv}&fields=regularMarketPrice'
+        url = (f'https://query1.finance.yahoo.com/v7/finance/quote'
+               f'?symbols={csv}&fields=regularMarketPrice,regularMarketChangePercent')
         r = requests.get(url, headers=_YF_HEADERS, timeout=15)
         for q in r.json().get('quoteResponse', {}).get('result', []):
             sym = q.get('symbol')
-            p = q.get('regularMarketPrice')
+            p   = q.get('regularMarketPrice')
+            chg = q.get('regularMarketChangePercent')
             if sym and p and float(p) >= PENNY_STOCK_MIN:
                 _price_cache[sym] = float(p)
+                if chg is not None:
+                    _change_cache[sym] = float(chg) / 100  # store as decimal, e.g. 0.015
     except Exception as e:
         print(f'Quote batch error: {e}')
 
@@ -294,16 +299,20 @@ def trading_bot():
                     continue
 
                 ma   = _ma_cache.get(symbol)
+                chg  = _change_cache.get(symbol)
                 prev = _prev_price_cache.get(symbol)
 
                 if ma and ma > 0:
-                    # Primary signal: deviation from 10-day MA
+                    # Best signal: deviation from 10-day MA (classic mean-reversion)
                     signal = (price - ma) / ma
+                elif chg is not None:
+                    # Good signal: intraday % change from yesterday's close (momentum)
+                    signal = chg
                 elif prev and prev > 0:
-                    # Fallback: short-term momentum (price change since last refresh)
+                    # Fallback: tick-to-tick change since last 60s refresh
                     signal = (price - prev) / prev
                 else:
-                    continue  # no data yet — skip symbol
+                    continue  # no data at all — skip
 
                 pos = positions_db.get(symbol)
 
