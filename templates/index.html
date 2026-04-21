@@ -687,7 +687,7 @@
   loadStrategy();
   fetchAll();
   setInterval(fetchAll, 2500);
-  loadReasoning();
+  setTimeout(() => loadReasoning(), 15000);          // wait 15s after page load
   setInterval(() => loadReasoning(), 10 * 60 * 1000);
   </script>
 </body>

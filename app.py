@@ -190,7 +190,7 @@ def _refresh_prices():
     for sym in missing_ma[:50]:
         try:
             url = f'https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=20d'
-            r = requests.get(url, headers=_YF_HEADERS, timeout=10)
+            r = requests.get(url, headers=_YF_HEADERS, timeout=5)
             closes = r.json()['chart']['result'][0]['indicators']['quote'][0]['close']
             closes = [c for c in closes if c is not None]
             if len(closes) >= 10:
@@ -636,7 +636,7 @@ def fetch_news_headlines(symbol, max_items=3):
     import requests
     try:
         url = f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US'
-        r = requests.get(url, headers=_YF_HEADERS, timeout=8)
+        r = requests.get(url, headers=_YF_HEADERS, timeout=4)
         root = ET.fromstring(r.content)
         headlines = []
         for item in root.iter('item'):
@@ -672,7 +672,7 @@ def generate_reasoning():
     symbols = list({p['symbol'] for p in positions} | {t['symbol'] for t in recent_trades[:10]})
 
     news_map = {}
-    for sym in symbols[:15]:
+    for sym in symbols[:5]:          # cap to 5 symbols max to keep response fast
         news_map[sym] = fetch_news_headlines(sym)
 
     pos_lines = []
