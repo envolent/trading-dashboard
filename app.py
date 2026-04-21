@@ -242,8 +242,9 @@ def portfolio_value(conn):
 # Trading bot (background thread)
 # ---------------------------------------------------------------------------
 
-_last_trade = {}       # symbol -> unix timestamp
-_last_equity_rec = 0   # unix timestamp
+_last_trade = {}        # symbol -> unix timestamp
+_last_equity_rec = 0    # unix timestamp
+_last_claude_call = 0   # unix timestamp — Claude decides every 5 min
 
 _PT = ZoneInfo('America/Los_Angeles')
 
@@ -252,6 +253,166 @@ def is_market_open():
     if now_pt.weekday() >= 5:          # Saturday=5, Sunday=6
         return False
     return 6 <= now_pt.hour < 13       # 6:00 AM – 1:00 PM PT
+
+
+def _claude_decide(bal, positions_db, n_pos, pval, remaining, cfg):
+    """Call Claude to decide what to trade. Returns list of action tuples."""
+    global _last_claude_call
+    import anthropic
+
+    # Top movers by absolute day change
+    movers = sorted(
+        [(s, c, _price_cache[s]) for s, c in _change_cache.items() if s in _price_cache],
+        key=lambda x: abs(x[1]), reverse=True
+    )[:30]
+
+    pos_lines = []
+    for sym, p in positions_db.items():
+        cur = get_price(sym) or p['avg_price']
+        pnl = (cur - p['avg_price']) * p['shares']
+        pos_lines.append(f"  {sym}: {p['shares']:.4f} sh @ ${p['avg_price']:.2f}, now ${cur:.2f}, P&L ${pnl:+.2f}")
+
+    mover_lines = [f"  {s}: {c*100:+.2f}% today @ ${pr:.2f}" for s, c, pr in movers]
+
+    max_pos = cfg['max_pos']
+    pos_pct = cfg['position_pct']
+
+    prompt = (
+        f"You are an autonomous paper trading bot. Make trading decisions NOW based on real market data.\n\n"
+        f"PORTFOLIO:\n"
+        f"  Cash: ${bal:.2f}\n"
+        f"  Portfolio value: ${pval:.2f}\n"
+        f"  Open positions: {n_pos}/{max_pos}\n"
+        f"  Trades left today: {remaining}\n\n"
+        f"CURRENT POSITIONS:\n" + ("\n".join(pos_lines) if pos_lines else "  None") + "\n\n"
+        f"TOP MOVERS RIGHT NOW:\n" + "\n".join(mover_lines) + "\n\n"
+        f"RULES:\n"
+        f"  - Max ${MAX_TRADE_VALUE:.0f} per buy order (if price > ${MAX_TRADE_VALUE:.0f}, buy exactly 1 share)\n"
+        f"  - Target position size: {pos_pct*100:.0f}% of portfolio per stock\n"
+        f"  - No penny stocks (price must be ≥ $5)\n"
+        f"  - Don't buy a symbol you already hold\n"
+        f"  - You may sell any current position\n"
+        f"  - Be decisive — make 1-5 trades if good opportunities exist\n\n"
+        f"Consider momentum, sector trends, risk management, and profit-taking.\n"
+        f"For BUY orders the 'shares' field is the number of shares to buy.\n"
+        f"For SELL orders set shares to the full position size shown above.\n\n"
+        f"Respond with a JSON array ONLY (no markdown, no explanation):\n"
+        f'[{{"action":"BUY","symbol":"NVDA","shares":2}},{{"action":"SELL","symbol":"AAPL","shares":1.5}}]\n'
+        f"Or [] if no good opportunities right now."
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
+        msg = client.messages.create(
+            model='claude-haiku-4-5',
+            max_tokens=400,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        _last_claude_call = time.time()
+        text = msg.content[0].text.strip()
+        if text.startswith('```'):
+            text = text.split('```')[1]
+            if text.startswith('json'):
+                text = text[4:].strip()
+        decisions = json.loads(text)
+        print(f'Claude decisions: {decisions}')
+    except Exception as e:
+        print(f'Claude decision error: {e}')
+        _last_claude_call = time.time()  # back off even on error
+        return []
+
+    # Convert Claude's decisions into validated action tuples
+    actions = []
+    cur_bal = bal
+    cur_n_pos = n_pos
+
+    for d in decisions:
+        action = d.get('action', '').upper()
+        symbol = d.get('symbol', '').upper().strip()
+        if not action or not symbol:
+            continue
+
+        price = get_price(symbol)
+        if not price or price < PENNY_STOCK_MIN:
+            continue
+
+        if action == 'BUY':
+            if cur_n_pos >= max_pos:
+                continue
+            if symbol in positions_db:
+                continue
+            raw_shares = d.get('shares', 0)
+            try:
+                shares = round(float(raw_shares), 4)
+            except Exception:
+                continue
+            if shares <= 0:
+                continue
+            # Enforce $500 cap
+            if price <= MAX_TRADE_VALUE:
+                max_shares = round(MAX_TRADE_VALUE / price, 4)
+                shares = min(shares, max_shares)
+            else:
+                shares = 1.0
+            cost = shares * price
+            if cost > cur_bal or shares <= 0:
+                continue
+            actions.append(('BUY', symbol, shares, price, cost, None))
+            cur_bal -= cost
+            cur_n_pos += 1
+
+        elif action == 'SELL':
+            pos = positions_db.get(symbol)
+            if not pos:
+                continue
+            shares = pos['shares']
+            proceeds = shares * price
+            pnl = proceeds - shares * pos['avg_price']
+            actions.append(('SELL', symbol, shares, price, proceeds, pnl))
+            cur_bal += proceeds
+            cur_n_pos -= 1
+
+    return actions
+
+
+def _rule_decide(bal, positions_db, n_pos, pval, remaining, cfg, now):
+    """Fallback rule-based decisions when no API key is set."""
+    actions = []
+    for symbol in WATCHLIST:
+        if len(actions) >= remaining:
+            break
+        if now - _last_trade.get(symbol, 0) < cfg['interval']:
+            continue
+        price = get_price(symbol)
+        if not price:
+            continue
+        ma   = _ma_cache.get(symbol)
+        chg  = _change_cache.get(symbol)
+        prev = _prev_price_cache.get(symbol)
+        if ma and ma > 0:
+            signal = (price - ma) / ma
+        elif chg is not None:
+            signal = chg
+        elif prev and prev > 0:
+            signal = (price - prev) / prev
+        else:
+            continue
+        pos = positions_db.get(symbol)
+        if signal > cfg['threshold'] and pos is None and n_pos < cfg['max_pos']:
+            shares = 1.0 if price > MAX_TRADE_VALUE else round(min(pval * cfg['position_pct'], MAX_TRADE_VALUE) / price, 4)
+            cost = shares * price
+            if cost <= bal and shares > 0:
+                actions.append(('BUY', symbol, shares, price, cost, None))
+                bal -= cost
+                n_pos += 1
+        elif signal < -cfg['threshold'] and pos is not None:
+            shares = pos['shares']
+            proceeds = shares * price
+            pnl = proceeds - shares * pos['avg_price']
+            actions.append(('SELL', symbol, shares, price, proceeds, pnl))
+            bal += proceeds
+            n_pos -= 1
+    return actions
 
 
 def trading_bot():
@@ -288,56 +449,18 @@ def trading_bot():
             cfg = STRATEGIES.get(strategy, STRATEGIES['safe'])
             remaining = MAX_DAILY_TRADES - daily_trades
 
-            # --- Decision phase (no lock) ---
+            # --- Decision phase: Claude AI (every 5 min) or rule-based fallback ---
             actions = []
-            for symbol in WATCHLIST:
-                if len(actions) >= remaining:
-                    break
-                if now - _last_trade.get(symbol, 0) < cfg['interval']:
-                    continue
-                price = get_price(symbol)
-                if not price:
-                    continue
+            api_key = os.environ.get('ANTHROPIC_API_KEY', '')
 
-                ma   = _ma_cache.get(symbol)
-                chg  = _change_cache.get(symbol)
-                prev = _prev_price_cache.get(symbol)
+            if api_key and now - _last_claude_call >= 300:
+                actions = _claude_decide(
+                    bal, positions_db, n_pos, pval, remaining, cfg)
+            elif not api_key:
+                actions = _rule_decide(
+                    bal, positions_db, n_pos, pval, remaining, cfg, now)
 
-                if ma and ma > 0:
-                    # Best signal: deviation from 10-day MA (classic mean-reversion)
-                    signal = (price - ma) / ma
-                elif chg is not None:
-                    # Good signal: intraday % change from yesterday's close (momentum)
-                    signal = chg
-                elif prev and prev > 0:
-                    # Fallback: tick-to-tick change since last 60s refresh
-                    signal = (price - prev) / prev
-                else:
-                    continue  # no data at all — skip
-
-                pos = positions_db.get(symbol)
-
-                if signal > cfg['threshold'] and pos is None and n_pos < cfg['max_pos']:
-                    # Cap at $500; if single share > $500 buy exactly 1
-                    if price > MAX_TRADE_VALUE:
-                        shares = 1.0
-                    else:
-                        shares = round(min(pval * cfg['position_pct'], MAX_TRADE_VALUE) / price, 4)
-                    cost = shares * price
-                    if cost <= bal and shares > 0:
-                        actions.append(('BUY', symbol, shares, price, cost, None))
-                        bal -= cost
-                        n_pos += 1
-
-                elif signal < -cfg['threshold'] and pos is not None:
-                    shares = pos['shares']
-                    proceeds = shares * price
-                    pnl = proceeds - shares * pos['avg_price']
-                    actions.append(('SELL', symbol, shares, price, proceeds, pnl))
-                    bal += proceeds
-                    n_pos -= 1
-
-            # --- Write phase (short lock, only if there's something to write) ---
+            # --- Write phase ---
             if actions:
                 with _db_lock:
                     conn = get_db()
