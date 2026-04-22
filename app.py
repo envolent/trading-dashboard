@@ -260,11 +260,20 @@ def _claude_decide(bal, positions_db, n_pos, pval, remaining, cfg):
     global _last_claude_call
     import anthropic
 
-    # Top movers by absolute day change
-    movers = sorted(
-        [(s, c, _price_cache[s]) for s, c in _change_cache.items() if s in _price_cache],
-        key=lambda x: abs(x[1]), reverse=True
-    )[:30]
+    # Build stock universe for Claude — prefer day-change movers, fall back to price cache
+    if _change_cache:
+        movers = sorted(
+            [(s, c, _price_cache[s]) for s, c in _change_cache.items() if s in _price_cache],
+            key=lambda x: abs(x[1]), reverse=True
+        )[:30]
+        mover_lines = [f"  {s}: {c*100:+.2f}% today @ ${pr:.2f}" for s, c, pr in movers]
+    elif _price_cache:
+        sample = list(_price_cache.items())[:30]
+        mover_lines = [f"  {s}: ${pr:.2f}" for s, pr in sample]
+    else:
+        # No price data yet — skip this cycle
+        _last_claude_call = time.time()
+        return []
 
     pos_lines = []
     for sym, p in positions_db.items():
@@ -272,33 +281,29 @@ def _claude_decide(bal, positions_db, n_pos, pval, remaining, cfg):
         pnl = (cur - p['avg_price']) * p['shares']
         pos_lines.append(f"  {sym}: {p['shares']:.4f} sh @ ${p['avg_price']:.2f}, now ${cur:.2f}, P&L ${pnl:+.2f}")
 
-    mover_lines = [f"  {s}: {c*100:+.2f}% today @ ${pr:.2f}" for s, c, pr in movers]
-
     max_pos = cfg['max_pos']
     pos_pct = cfg['position_pct']
 
     prompt = (
-        f"You are an autonomous paper trading bot. Make trading decisions NOW based on real market data.\n\n"
+        f"You are an autonomous paper trading bot managing a paper portfolio. Make trades NOW.\n\n"
         f"PORTFOLIO:\n"
         f"  Cash: ${bal:.2f}\n"
-        f"  Portfolio value: ${pval:.2f}\n"
+        f"  Total value: ${pval:.2f} (started at $10,000)\n"
         f"  Open positions: {n_pos}/{max_pos}\n"
         f"  Trades left today: {remaining}\n\n"
         f"CURRENT POSITIONS:\n" + ("\n".join(pos_lines) if pos_lines else "  None") + "\n\n"
-        f"TOP MOVERS RIGHT NOW:\n" + "\n".join(mover_lines) + "\n\n"
+        f"AVAILABLE STOCKS:\n" + "\n".join(mover_lines) + "\n\n"
         f"RULES:\n"
-        f"  - Max ${MAX_TRADE_VALUE:.0f} per buy order (if price > ${MAX_TRADE_VALUE:.0f}, buy exactly 1 share)\n"
-        f"  - Target position size: {pos_pct*100:.0f}% of portfolio per stock\n"
-        f"  - No penny stocks (price must be ≥ $5)\n"
-        f"  - Don't buy a symbol you already hold\n"
-        f"  - You may sell any current position\n"
-        f"  - Be decisive — make 1-5 trades if good opportunities exist\n\n"
-        f"Consider momentum, sector trends, risk management, and profit-taking.\n"
-        f"For BUY orders the 'shares' field is the number of shares to buy.\n"
-        f"For SELL orders set shares to the full position size shown above.\n\n"
-        f"Respond with a JSON array ONLY (no markdown, no explanation):\n"
-        f'[{{"action":"BUY","symbol":"NVDA","shares":2}},{{"action":"SELL","symbol":"AAPL","shares":1.5}}]\n'
-        f"Or [] if no good opportunities right now."
+        f"  - You MUST buy something if cash > $50 and positions < {max_pos}\n"
+        f"  - Max ${MAX_TRADE_VALUE:.0f} per buy order\n"
+        f"  - If a stock price > ${MAX_TRADE_VALUE:.0f}, buy exactly 1 share\n"
+        f"  - Otherwise buy shares = floor({MAX_TRADE_VALUE:.0f} / price)\n"
+        f"  - No penny stocks (price must be >= $5)\n"
+        f"  - Don't buy a symbol already in positions\n"
+        f"  - Sell positions that are losing >2% or have gained >3%\n\n"
+        f"Respond with a JSON array ONLY — no markdown, no explanation:\n"
+        f'[{{"action":"BUY","symbol":"NVDA","shares":1}},{{"action":"SELL","symbol":"AAPL","shares":2.5}}]\n'
+        f"You MUST include at least 1 trade if cash is available and positions < max."
     )
 
     try:
@@ -332,7 +337,7 @@ def _claude_decide(bal, positions_db, n_pos, pval, remaining, cfg):
         if not action or not symbol:
             continue
 
-        price = get_price(symbol)
+        price = get_price(symbol) or fetch_price_now(symbol)
         if not price or price < PENNY_STOCK_MIN:
             continue
 
@@ -453,7 +458,7 @@ def trading_bot():
             actions = []
             api_key = os.environ.get('ANTHROPIC_API_KEY', '')
 
-            if api_key and now - _last_claude_call >= 300:
+            if api_key and now - _last_claude_call >= 120:
                 actions = _claude_decide(
                     bal, positions_db, n_pos, pval, remaining, cfg)
             elif not api_key:
